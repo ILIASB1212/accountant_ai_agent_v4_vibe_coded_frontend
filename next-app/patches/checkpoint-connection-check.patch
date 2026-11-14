@@ -1,0 +1,11 @@
+diff --git a/src/backend/__init__.py b/src/backend/__init__.py
+--- a/src/backend/__init__.py
++++ b/src/backend/__init__.py
+@@ -52,6 +52,7 @@ async def life_span(app: FastAPI):
+     pool = ConnectionPool(
+         conninfo=Config.DATABASE_URL,
+         max_size=10,
++        check=ConnectionPool.check_connection,
+         # required by PostgresSaver; prepare_threshold=0 keeps Supabase's pooler happy
+         kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+         open=True,
