@@ -1,112 +1,111 @@
 import pickle
 from pathlib import Path
+
+import chromadb
 from langchain_chroma import Chroma
-from langchain_community.retrievers import BM25Retriever
 from langchain_classic.retrievers.ensemble import EnsembleRetriever
-import sys
-
-
-  # type: ignore
-from src.loging.logger import log
-from src.exceptions.custom_exceptions import CustomException
-
-logging = log
+from langchain_community.retrievers import BM25Retriever
 
 
 class VectorStore:
-    def __init__(self, embeddings, persist_directory):
+    """Persistent Chroma + BM25 hybrid vector store."""
+
+    def __init__(self, embeddings, persist_directory, collection_name: str = "langchain"):
         self.embeddings = embeddings
-        self.persist_directory = persist_directory
+        self.persist_directory = str(persist_directory)
+        self.collection_name = collection_name
         self.vectorstore = None
         self.hybrid_retriever = None
-        # create a file for BM25 if it doesn't exist
-        Path(persist_directory).mkdir(parents=True, exist_ok=True)
-        logging.info(f"✅ VectorStore initialized with persist_dir: {persist_directory}")
+        Path(self.persist_directory).mkdir(parents=True, exist_ok=True)
+        print(f"[VectorStore] Using persistence directory: {self.persist_directory}")
 
-    # ── Helper: BM25 file path ── create sub file for BM25 
     @property
     def _bm25_path(self) -> Path:
         return Path(self.persist_directory) / "bm25_index.pkl"
 
-    # ── CREATE (build hybrid + persist BM25 to disk) ──
+    def _delete_existing_collection(self) -> None:
+        """Remove the dense collection before a full rebuild to prevent duplicates."""
+        client = chromadb.PersistentClient(path=self.persist_directory)
+        collection_names = {collection.name for collection in client.list_collections()}
+        if self.collection_name in collection_names:
+            client.delete_collection(self.collection_name)
+
     def create_from_documents(self, documents):
+        if not documents:
+            raise ValueError("At least one document is required to build the vector store.")
+
         try:
-            # 1. Dense (Chroma persists automatically)
+            sparse_retriever = BM25Retriever.from_documents(documents)
+            sparse_retriever.k = 7
+
+            self._delete_existing_collection()
             self.vectorstore = Chroma.from_documents(
                 documents=documents,
                 embedding=self.embeddings,
-                persist_directory=self.persist_directory
+                collection_name=self.collection_name,
+                persist_directory=self.persist_directory,
             )
-            logging.info(f"✅ Created Chroma vectorstore with {len(documents)} documents")
-
-            # 2. Dense retriever
             dense_retriever = self.vectorstore.as_retriever(search_kwargs={"k": 10})
 
-            # 3. Sparse BM25 (build from docs)
-            sparse_retriever = BM25Retriever.from_documents(documents)
-            sparse_retriever.k = 3
+            temporary_path = self._bm25_path.with_suffix(".tmp")
+            with temporary_path.open("wb") as file:
+                pickle.dump(sparse_retriever, file)
+            temporary_path.replace(self._bm25_path)
 
-            # 4. Save BM25 to disk (pickle)
-            with open(self._bm25_path, "wb") as f:
-                pickle.dump(sparse_retriever, f)
-            logging.info(f"💾 BM25 index saved to {self._bm25_path}")
-
-            # 5. Hybrid ensemble
             self.hybrid_retriever = EnsembleRetriever(
                 retrievers=[dense_retriever, sparse_retriever],
-                weights=[0.7, 0.3]
+                weights=[0.6, 0.4],
             )
-
-            return self.vectorstore
-
+            print(f"[VectorStore] Indexed {len(documents)} documents in Chroma and BM25")
+            return self.hybrid_retriever
         except Exception as e:
-            logging.error(f"❌ Error creating vectorstore: {e}")
-            raise CustomException(f"Failed to create vectorstore{e}", sys)
+            raise RuntimeError(f"Failed to create vector store: {e}") from e
 
-    # ── LOAD EXISTING (restore both dense + BM25) ──
-    def load_existing(self, k: int = 4):
+    def load_existing(self, k: int = 10):
         try:
-            # 1. Load dense Chroma
+            client = chromadb.PersistentClient(path=self.persist_directory)
+            collection_names = {collection.name for collection in client.list_collections()}
+            if self.collection_name not in collection_names:
+                raise FileNotFoundError(
+                    f"Chroma collection '{self.collection_name}' was not found in "
+                    f"{self.persist_directory}."
+                )
+
             self.vectorstore = Chroma(
+                collection_name=self.collection_name,
                 embedding_function=self.embeddings,
-                persist_directory=self.persist_directory
+                persist_directory=self.persist_directory,
             )
-            logging.info(f"✅ Loaded Chroma from {self.persist_directory}")
-            dense_retriever = self.vectorstore.as_retriever(search_kwargs={"k": 10})
+            if self.vectorstore._collection.count() == 0:
+                raise ValueError(f"Chroma collection '{self.collection_name}' is empty.")
 
-            # 2. Load BM25 from disk
+            dense_retriever = self.vectorstore.as_retriever(search_kwargs={"k": k})
+            self.hybrid_retriever = None
+
             if self._bm25_path.exists():
-                with open(self._bm25_path, "rb") as f:
-                    sparse_retriever = pickle.load(f)
-                sparse_retriever.k = 3
-                logging.info(f"✅ Loaded BM25 index from {self._bm25_path}")
-
-                # 3. Rebuild hybrid
+                with self._bm25_path.open("rb") as file:
+                    sparse_retriever = pickle.load(file)
+                sparse_retriever.k = 7
                 self.hybrid_retriever = EnsembleRetriever(
                     retrievers=[dense_retriever, sparse_retriever],
-                    weights=[0.7, 0.3]
+                    weights=[0.6, 0.4],
                 )
-                logging.info("✅ Hybrid retriever restored")
+                print("[VectorStore] Loaded hybrid Chroma + BM25 retriever")
             else:
-                logging.warning("⚠️ No BM25 pickle found — falling back to dense only")
-                self.hybrid_retriever = None
+                print("[VectorStore] BM25 index missing; using dense retrieval")
 
-            # ← FIX: return the retriever, not the vectorstore
-            return self.get_retriever()
+            return self.get_retriever(k=k)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load vector store: {exc}") from exc
 
-        except Exception as e:
-            logging.error(f"❌ Error loading vectorstore: {e}")
-            raise CustomException(f"Failed to load vectorstore{e}", sys)
-
-    # ── GET RETRIEVER ──
-    def get_retriever(self, k: int = 4):
+    def get_retriever(self, k: int = 10):
         if self.vectorstore is None:
-            raise CustomException("Vectorstore not created yet.", sys)
+            raise RuntimeError("Vector store has not been created or loaded.")
 
         if self.hybrid_retriever is not None:
             return self.hybrid_retriever
 
         return self.vectorstore.as_retriever(
             search_type="mmr",
-            search_kwargs={"k": k, "fetch_k": 20, "lambda_mult": 0.5}
+            search_kwargs={"k": k, "fetch_k": max(20, k), "lambda_mult": 0.5},
         )

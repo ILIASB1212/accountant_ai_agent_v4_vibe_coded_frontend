@@ -1,10 +1,8 @@
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_experimental.text_splitter import SemanticChunker   # ← FIXED
-from src.loging.logger import log
-from src.exceptions.custom_exceptions import CustomException
+
 import sys
 
-logging=log
 
 
 
@@ -26,11 +24,9 @@ class TextSpliter:
 
            
             chunks = text_splitter.split_documents(documents)
-            logging.info(f"✅ Split {len(documents)} documents into {len(chunks)} chunks")
             return chunks
-        except Exception as e:
-            logging.error(f"❌ Error splitting documents: {e}")
-            raise CustomException(f"Failed to chunk  {e}",sys)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to chunk documents: {exc}") from exc
 
 
 
