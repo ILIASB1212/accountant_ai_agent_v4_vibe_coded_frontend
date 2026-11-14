@@ -1,13 +1,19 @@
 from functools import lru_cache
-from src.PipeLine.pipeline import RagPipeLine
+
 from langchain_classic.tools.retriever import create_retriever_tool
+
+from PipeLine.pipeline import RagPipeLine
 
 @lru_cache(maxsize=1)
 def _get_ras_retriever():
     rag = RagPipeLine(
         data_dir="./data/RAS",
-        persist_dir="artifacts/vectorestore/db_RAS",
-        force_rebuild=False
+        persist_dir="./data/chroma",
+        force_rebuild=False,
+        enable_reranking=True,
+        reranker_model="ms-marco-MiniLM-L-12-v2",
+        rerank_top_n=5,
+        
     )
     return rag.run()
 
