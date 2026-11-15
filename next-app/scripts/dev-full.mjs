@@ -81,6 +81,7 @@ async function run() {
         "127.0.0.1",
         "--port",
         "8000",
+        ...(process.platform === "win32" ? ["--loop", "asyncio:SelectorEventLoop"] : []),
       ],
       root,
       { RAG_NO_REBUILD: "1", PYTHONUTF8: "1" }
