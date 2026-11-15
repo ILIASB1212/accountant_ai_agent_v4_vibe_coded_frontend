@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import AIMessage
 from postgrest.exceptions import APIError
 
 # make `import src...` work whatever directory pytest is started from (local or CI)
@@ -134,9 +135,9 @@ class FakeClient:
 class FakeGraph:
     def __init__(self): self.calls = []
 
-    def invoke(self, state, config):
-        self.calls.append((state, config))
-        return {"messages": [SimpleNamespace(content="Réponse test")]}
+    async def ainvoke(self, state, config, context):
+        self.calls.append((state, config, context))
+        return {"messages": [AIMessage(content="Réponse test")]}
 
 
 class FakeMem0:
@@ -225,15 +226,19 @@ def test_full_flow(api):
     # chat: thread id = session id, memory scoped to company+client, history saved
     r = c.post(f"{AG}/invoke", json={"session_id": session_id, "message": "Taux de TVA ?"}, headers=hb)
     assert r.status_code == 200 and "Réponse test" in r.text
-    state, config = graph.calls[-1]
+    state, config, context = graph.calls[-1]
     assert config["configurable"]["thread_id"] == session_id
-    assert config["configurable"]["client_name"] == "Société Atlas SARL"
-    assert "TVA trimestrielle" in config["configurable"]["memory_context"]
+    assert context["client_name"] == "Société Atlas SARL"
+    assert "TVA trimestrielle" in context["memory_context"]
     assert FakeMem0.searches[-1]["filters"] == {"OR": [{"user_id": f"{company_id}:{client_id}"}, {"agent_id": company_id}]}
     assert FakeMem0.adds[-1]["user_id"] == f"{company_id}:{client_id}" and "agent_id" not in FakeMem0.adds[-1]
     assert [m["role"] for m in db.t["messages"]] == ["user", "assistant"]
+    streamed = c.post(f"{AG}/invoke", json={"session_id": session_id, "message": "TVA ?"}, headers={**hb, "Accept": "text/event-stream"})
+    assert streamed.status_code == 200
+    assert '"type": "done"' in streamed.text and "Réponse test" in streamed.text
+    assert "TVA trimestrielle" in graph.calls[-1][2]["memory_context"]
     hist = c.get(f"{AG}/sessions/{session_id}/messages", headers=h("alice")).json()
-    assert [m["role"] for m in hist] == ["user", "assistant"]  # owner sees the colleague's session
+    assert [m["role"] for m in hist] == ["user", "assistant", "user", "assistant"]  # owner sees the colleague's session
 
     # another company's owner cannot touch the session or the client
     c.post(f"{REG}/company", json={"company_name": "Cabinet Rival"}, headers=h("mallory"))

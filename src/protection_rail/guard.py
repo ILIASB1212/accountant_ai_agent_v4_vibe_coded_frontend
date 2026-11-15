@@ -1,43 +1,98 @@
-from guardrails import Guard
-from guardrails_ai.detect_jailbreak import DetectJailbreak
-from guardrails_ai.restricttotopic import RestrictToTopic
-from langchain_core.messages import HumanMessage, AIMessage
+import os
 
-# 1. Setup your Guardrails AI protection
-protection = Guard().use(
-    DetectJailbreak(threshold=0.95, on_fail="exception",),
-    RestrictToTopic(
-        valid_topics=[
-            "economics", "finance", "accounting", "exchange rates", "tax", "moroccan law",
-            "greetings and small talk",
-            "la retenu à la source ou RAS ",
-            "general assistant conversation, such as asking what the assistant remembers about the user",
-            "company historic client and deals and operations",
-            "friendly conversation"
+from deepagents import create_deep_agent
+from dotenv import load_dotenv
+from langchain.agents.middleware import after_agent, before_agent
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_groq import ChatGroq
+from nemoguardrails import LLMRails, RailsConfig
+from nemoguardrails.integrations.langchain.llm_adapter import LangChainLLMAdapter
+from nemoguardrails.rails.llm.options import RailStatus, RailType
+from pathlib import Path
+
+
+load_dotenv(override=True)
+
+groq_key = os.getenv("GROQ_API_KEY")
+if not groq_key:
+    raise RuntimeError("GROQ_API_KEY is missing from the .env file.")
+
+guard_llm = ChatGroq(
+    api_key=groq_key,
+    model="openai/gpt-oss-120b",
+    temperature=0,
+)
+
+rails = LLMRails(
+    RailsConfig.from_path(str(Path(__file__).resolve().parent)),
+    llm=LangChainLLMAdapter(guard_llm),
+)
+
+BLOCKED_INPUT_MESSAGE = (
+    "I only assist with accounting, business finance, and tax planning."
+)
+BLOCKED_OUTPUT_MESSAGE = (
+    "I cannot provide this response under my financial assistant policy."
+)
+
+
+@before_agent(can_jump_to=["end"])
+async def check_input(state, runtime):
+    question = next(
+        (
+            message
+            for message in reversed(state["messages"])
+            if isinstance(message, HumanMessage)
+        ),
+        None,
+    )
+    if question is None:
+        return None
+
+    result = await rails.check_async(
+        [{"role": "user", "content": question.content}],
+        rail_types=[RailType.INPUT],
+    )
+    if result.status == RailStatus.BLOCKED:
+        return {
+            "messages": [AIMessage(content=BLOCKED_INPUT_MESSAGE)],
+            "jump_to": "end",
+        }
+    return None
+
+
+@after_agent
+async def check_output(state, runtime):
+    question = next(
+        (
+            message
+            for message in reversed(state["messages"])
+            if isinstance(message, HumanMessage)
+        ),
+        None,
+    )
+    answer = next(
+        (
+            message
+            for message in reversed(state["messages"])
+            if isinstance(message, AIMessage)
+        ),
+        None,
+    )
+    if question is None or answer is None or answer.content == BLOCKED_INPUT_MESSAGE:
+        return None
+
+    result = await rails.check_async(
+        [
+            {"role": "user", "content": question.content},
+            {"role": "assistant", "content": answer.content},
         ],
-        invalid_topics=["religion", "coding and programing", "adult content"],
-        disable_llm=True,  # local zero-shot classifier only — no extra latency/cost from an LLM fallback call
-        on_fail="exception",
-        
+        rail_types=[RailType.OUTPUT],
     )
-    )
-
-# 2. Define the Guardrail Node
-def guardrail_node(state: dict) -> dict:
-    context_message = state["messages"][-1]
- 
-    if not isinstance(context_message, HumanMessage):
-        return {"messages": [], "blocked": False}
- 
-    user_text = context_message.content
- 
-    try:
-        protection.validate(user_text)
-        return {"messages": [], "blocked": False}
-    except Exception as e:
-        refusal = AIMessage(
-            content="I cannot process this request due to safety or topic policies."
-        )
-        print(f"[guardrail] blocked input: {user_text!r}")
-        print(f"[guardrail] reason: {e}")
-        return {"messages": [refusal], "blocked": True}
+    if result.status == RailStatus.BLOCKED:
+        return {
+            "messages": [
+                answer.model_copy(update={"content": BLOCKED_OUTPUT_MESSAGE})
+            ]
+        }
+    return None

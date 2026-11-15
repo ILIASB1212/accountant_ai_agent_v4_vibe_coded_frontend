@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import os
 import tempfile
@@ -5,7 +6,7 @@ from pathlib import Path
 from datetime import datetime
 
 import streamlit as st
-from langchain_core.messages import HumanMessage, AIMessageChunk
+from langchain_core.messages import HumanMessage
 
 from src.tools.groq_ocr import ocr_document
 from src.memory.memory_class import Memory
@@ -31,8 +32,8 @@ with st.sidebar:
 
 @st.cache_resource
 def load_agent():
-    from src.agentic_workflow.agent import graph
-    return graph
+    from src.agentic_workflow.agent import agent
+    return agent
 
 
 # ============================================================
@@ -60,62 +61,15 @@ def get_response(user_text: str):
         }
     }
 
-    full_response = ""
-    try:
-        # Try to stream the response
-        for chunk in agent.stream(
-            {"messages": [HumanMessage(content=user_text)]},
-            config=config,
-            stream_mode="messages"
-        ):
-            # Extract ONLY the AI-generated content chunks, ignore metadata/tool calls
-            content = ""
-
-            # Handle direct AIMessageChunk objects (these contain the actual LLM responses)
-            if isinstance(chunk, AIMessageChunk):
-                content = chunk.content
-            # Handle tuple format where first element might be AIMessageChunk
-            elif isinstance(chunk, tuple) and len(chunk) >= 1:
-                first_elem = chunk[0]
-                if isinstance(first_elem, AIMessageChunk):
-                    content = first_elem.content
-            # Handle dict format that might contain AI-generated content
-            elif isinstance(chunk, dict):
-                # Look for AIMessageChunk-like content in dict
-                if 'content' in chunk and isinstance(chunk['content'], str):
-                    content = chunk['content']
-                # Sometimes the content is nested differently
-                elif 'messages' in chunk and isinstance(chunk['messages'], list):
-                    # Look for the latest AI message in messages
-                    for msg in reversed(chunk['messages']):
-                        if hasattr(msg, 'content') and isinstance(msg.content, str):
-                            content = msg.content
-                            break
-                        elif isinstance(msg, dict) and msg.get('type') == 'ai' and 'content' in msg:
-                            content = msg['content']
-                            break
-
-            # Only yield non-empty content from AI messages to avoid spamming empty chunks
-            # and ignore pure metadata/tool call chunks
-            if content and isinstance(content, str) and content.strip():
-                full_response += content
-                yield content
-    except Exception as e:
-        # If streaming fails, fall back to non-streaming
-        agent_response = agent.invoke({"messages": [HumanMessage(content=user_text)]}, config=config)
-        fallback_content = agent_response["messages"][-1].content
-        if fallback_content and isinstance(fallback_content, str) and fallback_content.strip():
-            full_response = fallback_content
-            yield full_response
-        else:
-            # If fallback also empty, use default message
-            full_response = "I’m sorry, but I can’t comply with that request."
-            yield full_response
-
-    # If after streaming (and fallback) we still have no response, provide a default
-    if not full_response:
-        full_response = "I’m sorry, but I can’t comply with that request."
-        yield full_response
+    # Wait for the output guardrail before displaying the response.
+    agent_response = asyncio.run(
+        agent.ainvoke({"messages": [HumanMessage(content=user_text)]}, config=config)
+    )
+    content = agent_response["messages"][-1].content
+    full_response = content if isinstance(content, str) and content.strip() else (
+        "No response was returned. Please try again."
+    )
+    yield full_response
 
     # Update memory with the full response after streaming is complete
     # Wrap in try/except to prevent crashes if memory storage fails

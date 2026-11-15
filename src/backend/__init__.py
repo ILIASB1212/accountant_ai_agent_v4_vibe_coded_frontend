@@ -18,9 +18,9 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
+from psycopg_pool import AsyncConnectionPool
 
 from src.agentic_workflow.agent import build_graph
 from src.backend.agent.endpoint import agent_router
@@ -47,21 +47,22 @@ end $$;
 @asynccontextmanager
 async def life_span(app: FastAPI):
     print("Starting up...")
-    pool = ConnectionPool(
+    pool = AsyncConnectionPool(
         conninfo=Config.DATABASE_URL,
         max_size=10,
-        check=ConnectionPool.check_connection,
+        check=AsyncConnectionPool.check_connection,
         # required by PostgresSaver; prepare_threshold=0 keeps Supabase's pooler happy
         kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
-        open=True,
+        open=False,
     )
-    checkpointer = PostgresSaver(pool)
-    checkpointer.setup()  # idempotent: creates the checkpoint tables on first run
-    with pool.connection() as conn:
-        conn.execute(LOCK_CHECKPOINT_TABLES)
+    await pool.open()
+    checkpointer = AsyncPostgresSaver(pool)
+    await checkpointer.setup()
+    async with pool.connection() as conn:
+        await conn.execute(LOCK_CHECKPOINT_TABLES)
     app.state.graph = build_graph(checkpointer)
     yield
-    pool.close()
+    await pool.close()
     print("Shutting down...")
 
 

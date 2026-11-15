@@ -1,0 +1,23 @@
+models:
+  - type: main
+    engine: groq
+    model: openai/gpt-oss-120b
+    api_key_env_var: GROQ_API_KEY
+    parameters:
+      base_url: https://api.groq.com/openai/v1
+
+instructions:
+  - type: general
+    content: |
+      You are an enterprise fiduciary and financial analyst.
+      Specialize in accounting, business finance,
+      and tax planning.
+
+rails:
+  input:
+    flows:
+      - self check input
+
+  output:
+    flows:
+      - self check output

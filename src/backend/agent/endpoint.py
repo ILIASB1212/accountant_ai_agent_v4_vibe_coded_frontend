@@ -5,7 +5,7 @@ from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from postgrest.exceptions import APIError
 
 from src.backend.agent.schemas import ChatModel, ClientCreate, OCRResult, SessionCreate
@@ -160,47 +160,20 @@ def _save_answer(m: Membership, session_id: str, message: str, answer: str) -> b
         return False
 
 
-def _answer_events(graph, body: ChatModel, config: dict, m: Membership, memory: Memory, background: BackgroundTasks):
+async def _answer_events(graph, body: ChatModel, config: dict, context: dict, m: Membership, memory: Memory, background: BackgroundTasks):
     """Stream only chat text; tool output, arguments and internal events stay private."""
     def event(payload: dict) -> str:
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-    final_state = None
-    message_id = None
     visible = ""
-    tool_call = False
-    text_events = 0
     try:
         yield event({"type": "status", "phase": "checking"})
-        for mode, data in graph.stream(
+        # Do not expose model tokens before the asynchronous output guardrail runs.
+        final_state = await graph.ainvoke(
             {"messages": [HumanMessage(content=body.message)]},
             config=config,
-            stream_mode=["messages", "values"],
-        ):
-            if mode == "values":
-                final_state = data
-                continue
-            chunk, metadata = data
-            if metadata.get("langgraph_node") != "chat" or not isinstance(chunk, AIMessageChunk):
-                continue
-            if chunk.id != message_id:
-                message_id = chunk.id
-                tool_call = False
-                if visible:
-                    visible = ""
-                    yield event({"type": "replace", "text": ""})
-            if chunk.tool_call_chunks or chunk.tool_calls:
-                tool_call = True
-                if visible:
-                    visible = ""
-                    yield event({"type": "replace", "text": ""})
-            if tool_call:
-                continue
-            text = chunk.text
-            if text:
-                text_events += 1
-                visible += text
-                yield event({"type": "delta", "text": text})
+            context=context,
+        )
 
         # This is authoritative, including guardrail refusals and non-streaming model fallbacks.
         if not final_state or not final_state.get("messages"):
@@ -211,10 +184,10 @@ def _answer_events(graph, body: ChatModel, config: dict, m: Membership, memory: 
         answer = answer if isinstance(answer, str) else str(answer)
         if answer != visible:
             yield event({"type": "replace", "text": answer})
-        saved = _save_answer(m, str(body.session_id), body.message, answer)
+        saved = await run_in_threadpool(_save_answer, m, str(body.session_id), body.message, answer)
         background.add_task(_remember, memory, answer)
         blocked = bool(final_state.get("blocked", False))
-        logger.info("chat stream completed: text_events=%d, blocked=%s", text_events, blocked)
+        logger.info("chat completed: blocked=%s", blocked)
         yield event({"type": "done", "answer": answer, "history_saved": saved, "blocked": blocked})
     except Exception:
         logger.exception("agent stream failed")
@@ -222,13 +195,13 @@ def _answer_events(graph, body: ChatModel, config: dict, m: Membership, memory: 
 
 
 @agent_router.post("/invoke")
-def ask_agent(
+async def ask_agent(
     body: ChatModel,
     request: Request,
     background: BackgroundTasks,
     m: Membership = Depends(active_member),
 ):
-    session = _get_session(m, str(body.session_id))  # 404 unless it is in the caller's company
+    session = await run_in_threadpool(_get_session, m, str(body.session_id))  # 404 unless it is in the caller's company
 
     client = (
         m.user.db.table("clients").select("name")
@@ -239,7 +212,8 @@ def ask_agent(
     # Long-term memory is scoped by IDs read from the database row, never from the request.
     memory = Memory.for_client(body.message, session["company_id"], session["client_id"])
     try:
-        memory_context = memory.format_context_for_systeme(memory.retrive())
+        memories = await run_in_threadpool(memory.retrive)
+        memory_context = memory.format_context_for_systeme(memories)
     except Exception:
         logger.exception("mem0 search failed")
         memory_context = ""
@@ -247,14 +221,13 @@ def ask_agent(
     config = {
         "configurable": {
             "thread_id": str(body.session_id),  # conversation state lives per session
-            "memory_context": memory_context,   # picked up by chat_node, never enters the checkpoint
-            "client_name": client_name,
         }
     }
+    context = {"memory_context": memory_context, "client_name": client_name}
 
     if "text/event-stream" in request.headers.get("accept", ""):
         return StreamingResponse(
-            _answer_events(request.app.state.graph, body, config, m, memory, background),
+            _answer_events(request.app.state.graph, body, config, context, m, memory, background),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no"},
             background=background,
@@ -262,8 +235,8 @@ def ask_agent(
 
     start = datetime.now()
     try:
-        result = request.app.state.graph.invoke(
-            {"messages": [HumanMessage(content=body.message)]}, config=config
+        result = await request.app.state.graph.ainvoke(
+            {"messages": [HumanMessage(content=body.message)]}, config=config, context=context
         )
     except Exception:
         logger.exception("agent failed")
@@ -272,7 +245,7 @@ def ask_agent(
     answer = answer if isinstance(answer, str) else str(answer)
     elapsed = (datetime.now() - start).total_seconds()
 
-    _save_answer(m, str(body.session_id), body.message, answer)
+    await run_in_threadpool(_save_answer, m, str(body.session_id), body.message, answer)
 
     background.add_task(_remember, memory, answer)
     return PlainTextResponse(f"_Response generated in {elapsed:.2f} seconds_ \n {answer}")
