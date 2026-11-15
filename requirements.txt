@@ -1,0 +1,73 @@
+# langchain ecosysteme
+langchain
+langgraph
+pandas
+langchain_openrouter
+langchain_community
+langchain_huggingface
+langchain_chroma
+langchain_community
+langchain_experimental
+langgraph-supervisor
+langchain_openai
+langchain_classic
+langgraph-checkpoint-postgres
+# utilitis
+pyaml
+ipynb
+ipykernel
+# RAGS and VectorStore
+pypdf
+rank_bm25
+# transformer
+google-search-results
+streamlit
+langfuse
+fastapi
+# guardrails
+litellm==1.99.2
+presidio-analyzer
+presidio-anonymizer
+guardrails-ai
+guardrails-ai-detect-jailbreak 
+guardrails-ai-restrict-to-topic
+
+#database
+
+pydantic-settings
+sqlmodel
+alembic
+supabase
+pydantic[email]
+
+# other tools
+ 
+pytest
+ragas
+python-dotenv
+mem0ai
+redis==5.0.0
+pyrit
+pillow 
+pypdfium2
+pymupdf>=1.24,<2
+python-multipart>=0.0.20
+psycopg[binary,pool]
+
+
+
+
+# 
+
+nemoguardrails
+deepagents
+flashrank
+langchain-classic
+
+langchain_groq
+
+langchain-mcp-adapters
+
+
+
+
