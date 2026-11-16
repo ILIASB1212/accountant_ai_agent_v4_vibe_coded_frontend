@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-
+from src.agentic_workflow.subagents import subagents
 # The existing RAG modules use imports relative to the src directory.
 _src_dir = str(Path(__file__).resolve().parents[1])
 if _src_dir not in sys.path:
@@ -79,6 +79,7 @@ def build_graph():
     middleware=[check_input, check_output, memory_prompt],
     checkpointer=MemorySaver(),
     backend=StateBackend(),
+    subagents=subagents,
     system_prompt=SystemMessage(content=CHAT_PROMPT)
     )
 
